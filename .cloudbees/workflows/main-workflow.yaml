@@ -1,0 +1,441 @@
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: workflow
+name: Main workflow
+on:
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+    inputs:
+      bypass_security_gate:
+        description: 'Bypass 30-minute security gate'
+        type: boolean
+        default: false
+permissions:
+  scm-token-own: read
+  scm-token-org: read
+  id-token: write
+jobs:
+  test:
+    steps:
+      - name: Run Jenkins Job
+        kind: test
+        uses: cloudbees-io/jenkins-run-job@v2
+        continue-on-error: true
+        with:
+          url: https://sda.preview.cb-demos.io/westest/
+          username: ${{ secrets.WES_JENKINS_USERNAME }}
+          token: ${{ secrets.WES_JENKINS_TOKEN }}
+          job-name: WesTestJob
+      - name: Run GHA Workflow
+        uses: cloudbees-io/ghactions-run-workflow@v2
+        continue-on-error: true
+        with:
+          token: ${{ secrets.WES_GH_TOKEN }}
+          org-name: cloudbees-days
+          repo-name: hackers-WesTest4Mark2
+          branch-name: main
+          workflow-name: test-and-build-image2
+          test-type: JUnit
+          test-result-location: junit.xml
+      - name: Get source code
+        uses: cloudbees-io/checkout@v1
+        continue-on-error: true
+      - name: Run unit tests
+        kind: test
+        id: RunUnitTest
+        uses: docker://node:lts
+        run: |
+          npm ci
+          npm run test:unit
+          npx jest --coverage >> $CLOUDBEES_OUTPUTS/CODE_COVERAGE
+      - name: Publish test results
+        uses: cloudbees-io/publish-test-results@v1
+        with:
+          test-type: JUnit
+          folder-name: ${{ cloudbees.workspace }}/junit.xml
+      - name: Publish evidence
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          content: |-
+            ## Test code coverage
+            ${{ steps.RunUnitTest.outputs.CODE_COVERAGE }}
+          format: MARKDOWN
+    outputs:
+      CODE_COVERAGE: ${{ steps.RunUnitTest.outputs.CODE_COVERAGE }}
+  build-container-image:
+    needs: test
+    steps:
+      - uses: cloudbees-io/checkout@v1
+        name: Get source code
+        kind: build
+        continue-on-error: true
+      - uses: cloudbees-io/configure-oci-credentials@v1
+        name: Configure container registry credentials
+        continue-on-error: true
+        id: dockerconfig
+        with:
+          registry: https://index.docker.io/v1/
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: cloudbees-io/kaniko@v1
+        name: Build container image
+        kind: build
+        with:
+          destination: ${{ secrets.DOCKERHUB_USER }}/hackers-organized:${{ cloudbees.scm.sha }}
+          tar-path: container-image.tar
+          build-args: BUILDKIT_CONTEXT_KEEP_GIT_DIR=1,BUILDKIT_INLINE_CACHE=1
+      - uses: cloudbees-io/asset-chain-utils-preprod/upload-binary@v1
+        name: Upload binary from container build
+        id: upload-binary
+        with:
+          file-path: container-image.tar
+          file-type: BINARY_CONTAINER
+          debug: "true"
+      - name: Register build artifact
+        id: register-artifact
+        uses: cloudbees-io/register-build-artifact@v2
+        with:
+          name: "ldonleycb/hackers-organized"
+          version: "${{ cloudbees.scm.sha }}"
+          url: "${{ secrets.DOCKERHUB_USER }}/hackers-organized:${{ cloudbees.scm.sha }}"
+      - name: Publish evidence
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          content: |-
+            ## Built and pushed image to docker hub
+
+            [Docker Hub](https://hub.docker.com/repository/docker/ldonleycb/hackers-organized/tags)
+
+            **Artifact ID:** ${{ steps.register-artifact.outputs.artifact-id }}
+            **Image:** hackers-organized:${{ cloudbees.scm.sha }}
+          format: MARKDOWN
+    outputs:
+      ARTIFACT_ID: ${{ steps.register-artifact.outputs.artifact-id }}
+  scan:
+    outputs:
+      BLOCKER_COUNT: ${{ steps.FetchSonarQubeIssues.outputs.BLOCKER_COUNT }}
+      CRITICAL_COUNT: ${{ steps.FetchSonarQubeIssues.outputs.CRITICAL_COUNT }}
+      MAJOR_COUNT: ${{ steps.FetchSonarQubeIssues.outputs.MAJOR_COUNT }}
+      MINOR_COUNT: ${{ steps.FetchSonarQubeIssues.outputs.MINOR_COUNT }}
+    steps:
+      - name: Checkout
+        uses: cloudbees-io/checkout@v1
+      - name: Get code coverage
+        kind: test
+        uses: docker://node:lts
+        run: |
+          npm ci
+          npm run test:coverage
+      - uses: cloudbees-io/sonarqube-bundled-sast-scan-code@v1
+        name: Scan with SonarQube
+        kind: scan
+        continue-on-error: true
+        with:
+          language: LANGUAGE_JS
+          cover-file-name: coverage/clover.xml
+          sonar-exclusion: tests/*
+      - uses: cloudbees-io/snyk-sast-scan-code@v1
+        name: Synk SAST
+        kind: scan
+        continue-on-error: true
+        with:
+          orgname: ${{ secrets.SNYK_ORGNAME }}
+          token: ${{ secrets.SNYK_TOKEN }}
+          language: LANGUAGE_JS
+      - name: Scan with Snyk SCA
+        uses: cloudbees-io/snyk-sca-scan-dependency@v1
+        continue-on-error: true
+        with:
+          orgname: ${{ secrets.SNYK_ORGNAME }}
+          token: ${{ secrets.SNYK_TOKEN }}
+          language: LANGUAGE_JS
+      - name: Fetch SonarQube Issues
+        id: FetchSonarQubeIssues
+        uses: docker://alpine/git:latest
+        run: |
+          apk add --no-cache curl jq
+          curl -u ${{ secrets.SONAR_USER }}:${{ secrets.SONAR_TOKEN }} \
+          "https://sonarqube.cb-demos.io/api/issues/search?componentKeys=HackersOrganized&severities=BLOCKER,CRITICAL,MAJOR,MINOR" \
+          -o sonar-issues.json
+          BLOCKER_COUNT=$(jq '[.issues[] | select(.severity=="BLOCKER")] | length' sonar-issues.json)
+          CRITICAL_COUNT=$(jq '[.issues[] | select(.severity=="CRITICAL")] | length' sonar-issues.json)
+          MAJOR_COUNT=$(jq '[.issues[] | select(.severity=="MAJOR")] | length' sonar-issues.json)
+          MINOR_COUNT=$(jq '[.issues[] | select(.severity=="MINOR")] | length' sonar-issues.json)
+
+          echo "${BLOCKER_COUNT}" >> $CLOUDBEES_OUTPUTS/BLOCKER_COUNT
+          echo "${CRITICAL_COUNT}" >> $CLOUDBEES_OUTPUTS/CRITICAL_COUNT
+          echo "${MAJOR_COUNT}" >> $CLOUDBEES_OUTPUTS/MAJOR_COUNT
+          echo "${MINOR_COUNT}" >> $CLOUDBEES_OUTPUTS/MINOR_COUNT
+      - name: Publish evidence
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          content: |-
+            ## SonarQube Analysis Results
+
+            | Severity             | Issue Count |
+            |----------------------|-------------|
+            | BLOCKER_COUNT        | ${{ steps.FetchSonarQubeIssues.outputs.BLOCKER_COUNT }} |
+            | CRITICAL_COUNT       | ${{ steps.FetchSonarQubeIssues.outputs.CRITICAL_COUNT }} |
+            | MAJOR_COUNT          | ${{ steps.FetchSonarQubeIssues.outputs.MAJOR_COUNT }} |
+            | MINOR_COUNT          | ${{ steps.FetchSonarQubeIssues.outputs.MINOR_COUNT }} |
+          format: MARKDOWN
+  security-check:
+    needs:
+      - build-container-image
+      - scan
+    outputs:
+      vuln_count: ${{ steps.fetch-vulns.outputs.vuln_count }}
+      severity_level: ${{ steps.fetch-vulns.outputs.severity_level }}
+      very_high_count: ${{ steps.fetch-vulns.outputs.very_high_count }}
+      high_count: ${{ steps.fetch-vulns.outputs.high_count }}
+      medium_count: ${{ steps.fetch-vulns.outputs.medium_count }}
+      low_count: ${{ steps.fetch-vulns.outputs.low_count }}
+      total_count: ${{ steps.fetch-vulns.outputs.total_count }}
+      scan_datetime: ${{ steps.fetch-vulns.outputs.scan_datetime }}
+    steps:
+      - name: Fetch Security Vulnerabilities
+        id: fetch-vulns
+        uses: docker://alpine:latest
+        run: |
+          apk add --no-cache curl jq
+
+          SCAN_DATETIME=$(date '+%Y-%m-%d %H:%M:%S %Z')
+
+          # Check bypass
+          if [ "${{ secrets.MARK_1Time_Bypass }}" = "TRUE" ]; then
+            echo "🚨 ONE-TIME SECURITY GATE BYPASS GRANTED!"
+          else
+            echo "✅ No bypass active - normal security gate enforcement"
+          fi
+
+          # CORRECT CloudBees Unify REST API - Use known working format
+          COMPONENT_ID="${{ cloudbees.component.id }}"
+          ORG_ID="2f05829d-ea2c-429e-7d3b-98ba87db3776"
+          ENDPOINT_ID="e8c14f62-66e8-4846-a077-3b9a887a7255"
+          
+          echo "🔍 Using validated CloudBees Unify REST API for component: $COMPONENT_ID"
+
+          # Get branch ID from branches API
+          BRANCHES_RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.CLOUDBEES_API_TOKEN }}" \
+          "https://api.cloudbees.io/v1/components/$COMPONENT_ID/branches")
+
+          if ! echo "$BRANCHES_RESPONSE" | jq -e '.[0].id' > /dev/null 2>&1; then
+            echo "❌ Failed to get branch details"
+            echo "Response: $BRANCHES_RESPONSE"
+            exit 1
+          fi
+
+          BRANCH_ID=$(echo "$BRANCHES_RESPONSE" | jq -r '.[0].id')
+          echo "✅ Found Branch ID: $BRANCH_ID"
+
+          # Build correct CloudBees Unify REST API URL
+          API_URL="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/branches/${BRANCH_ID}/issues"
+          echo "✅ CloudBees Unify API URL: $API_URL"
+
+          # Make vulnerability API call
+          RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.CLOUDBEES_API_TOKEN }}" \
+          "${API_URL}?pagination.sort.order=1&pagination.sort.field_name=severity&pagination.page_length=100&pagination.page=1&triageStatus=UNREVIEWED")
+
+          # Validate API response
+          if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
+            echo "❌ Vulnerability API Error: $(echo "$RESPONSE" | jq -r '.error')"
+            exit 1
+          fi
+
+          # Extract vulnerability counts
+          VERY_HIGH_COUNT=$(echo "$RESPONSE" | jq '.issues | map(select(.severity == "VERY_HIGH")) | length')
+          HIGH_COUNT=$(echo "$RESPONSE" | jq '.issues | map(select(.severity == "HIGH")) | length')
+          MEDIUM_COUNT=$(echo "$RESPONSE" | jq '.issues | map(select(.severity == "MEDIUM")) | length')
+          LOW_COUNT=$(echo "$RESPONSE" | jq '.issues | map(select(.severity == "LOW")) | length')
+          TOTAL_COUNT=$(echo "$RESPONSE" | jq '.issues | length')
+
+          # Output results
+          echo "$HIGH_COUNT" > $CLOUDBEES_OUTPUTS/vuln_count
+          echo "$VERY_HIGH_COUNT" > $CLOUDBEES_OUTPUTS/very_high_count
+          echo "$HIGH_COUNT" > $CLOUDBEES_OUTPUTS/high_count
+          echo "$MEDIUM_COUNT" > $CLOUDBEES_OUTPUTS/medium_count
+          echo "$LOW_COUNT" > $CLOUDBEES_OUTPUTS/low_count
+          echo "$TOTAL_COUNT" > $CLOUDBEES_OUTPUTS/total_count
+          echo "$SCAN_DATETIME" > $CLOUDBEES_OUTPUTS/scan_datetime
+          echo "HIGH" > $CLOUDBEES_OUTPUTS/severity_level
+
+          echo "🔍 Security Scan Results:"
+          echo "- HIGH Vulnerabilities: $HIGH_COUNT"
+          echo "- TOTAL Vulnerabilities: $TOTAL_COUNT"
+          
+          if [ "${{ secrets.MARK_1Time_Bypass }}" = "TRUE" ]; then
+            echo "- Security Gate: BYPASSED (Admin override)"
+          else
+            echo "- Security Gate Required: $([ $HIGH_COUNT -ge 6 ] && echo 'YES (≥6 High)' || echo 'NO (<6 High)')"
+          fi
+
+      - name: Generate Security Evidence Report
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          content: |-
+            # Security Vulnerability Report
+
+            **Component:** ${{ cloudbees.component.id }}
+            **Security Check Date & Time:** ${{ steps.fetch-vulns.outputs.scan_datetime }}
+            **Total Vulnerabilities:** ${{ steps.fetch-vulns.outputs.total_count }}
+            **Data Source:** Real-time CloudBees Unify REST API
+
+            ## Severity Breakdown
+            | Severity | Count |
+            |----------|-------|
+            | Very High | ${{ steps.fetch-vulns.outputs.very_high_count }} |
+            | High | ${{ steps.fetch-vulns.outputs.high_count }} |
+            | Medium | ${{ steps.fetch-vulns.outputs.medium_count }} |
+            | Low | ${{ steps.fetch-vulns.outputs.low_count }} |
+            | **TOTAL** | ${{ steps.fetch-vulns.outputs.total_count }} |
+
+            ## Security Gate Decision
+            One-time bypass check: Administrative override capability available
+
+            ## Risk Assessment
+            - **Critical Risk**: ${{ steps.fetch-vulns.outputs.very_high_count }} Very High vulnerabilities
+            - **High Risk**: ${{ steps.fetch-vulns.outputs.high_count }} High severity vulnerabilities
+            - **Total Risk**: All ${{ steps.fetch-vulns.outputs.total_count }} vulnerabilities require attention
+          format: MARKDOWN
+  security-gate:
+    needs: security-check
+    if: ${{ secrets.MARK_1Time_Bypass != 'TRUE' }}
+    outputs:
+      gate_status: ${{ steps.security-polling.outputs.gate_status }}
+      final_vuln_count: ${{ steps.security-polling.outputs.final_vuln_count }}
+      poll_results: ${{ steps.security-polling.outputs.poll_results }}
+    steps:
+      - name: Security Gate Polling
+        id: security-polling
+        uses: docker://alpine:latest
+        run: |
+          apk add --no-cache curl jq
+
+          echo "🚨 SECURITY GATE ACTIVATED 🚨"
+          echo "Initial High Vulnerabilities: ${{ needs.security-check.outputs.vuln_count }}"
+
+          # Use same validated CloudBees Unify REST API format
+          COMPONENT_ID="${{ cloudbees.component.id }}"
+          ORG_ID="2f05829d-ea2c-429e-7d3b-98ba87db3776"
+          ENDPOINT_ID="e8c14f62-66e8-4846-a077-3b9a887a7255"
+
+          # Get branch ID
+          BRANCHES_RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.CLOUDBEES_API_TOKEN }}" \
+          "https://api.cloudbees.io/v1/components/$COMPONENT_ID/branches")
+
+          if ! echo "$BRANCHES_RESPONSE" | jq -e '.[0].id' > /dev/null 2>&1; then
+            echo "❌ Failed to get branch details - cannot proceed"
+            exit 1
+          fi
+
+          BRANCH_ID=$(echo "$BRANCHES_RESPONSE" | jq -r '.[0].id')
+
+          # Build API URL
+          API_URL="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/branches/${BRANCH_ID}/issues"
+
+          # Initialize polling variables
+          POLL_RESULTS=""
+          GATE_STATUS="FAILED"
+          START_TIME=$(date +%s)
+          END_TIME=$((START_TIME + 1800))
+          POLL_COUNT=0
+
+          # 30-minute polling loop
+          while [ $(date +%s) -lt $END_TIME ]; do
+            POLL_COUNT=$((POLL_COUNT + 1))
+            ELAPSED_MIN=$(( (POLL_COUNT - 1) * 5 ))
+
+            echo "🔍 High Security Check Poll #${POLL_COUNT} (${ELAPSED_MIN}:00 elapsed)"
+
+            # Make API call
+            RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.CLOUDBEES_API_TOKEN }}" \
+            "${API_URL}?pagination.sort.order=1&pagination.sort.field_name=severity&pagination.page_length=100&pagination.page=1&triageStatus=UNREVIEWED")
+
+            # Extract current High count
+            if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
+              echo "❌ API Error during poll #${POLL_COUNT}"
+              exit 1
+            fi
+
+            CURRENT_COUNT=$(echo "$RESPONSE" | jq '.issues | map(select(.severity == "HIGH")) | length')
+            echo "   Result: ${CURRENT_COUNT} High vulnerabilities"
+
+            # Check success criteria
+            if [ $CURRENT_COUNT -lt 6 ]; then
+              echo "✅ SUCCESS: High vulnerabilities reduced to ${CURRENT_COUNT} (<6)"
+              GATE_STATUS="PASSED"
+              break
+            fi
+
+            if [ $POLL_COUNT -ge 7 ]; then break; fi
+            sleep 300
+          done
+
+          # Check exception after polling
+          if [ "$GATE_STATUS" = "FAILED" ] && [ "${{ secrets.MARK_1Time_Exception }}" = "TRUE" ]; then
+            echo "🚨 ONE-TIME VULNERABILITY EXCEPTION GRANTED!"
+            GATE_STATUS="PASSED"
+          fi
+
+          echo "$GATE_STATUS" > $CLOUDBEES_OUTPUTS/gate_status
+
+          if [ "$GATE_STATUS" = "FAILED" ]; then
+            exit 1
+          fi
+
+      - name: Publish Security Gate Evidence
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          content: |-
+            # Security Gate Polling Results
+
+            **Gate Status:** ${{ steps.security-polling.outputs.gate_status }}
+            **Initial High Count:** ${{ needs.security-check.outputs.vuln_count }}
+            **Final High Count:** ${{ steps.security-polling.outputs.final_vuln_count }}
+            **Polling Duration:** 30 minutes (7 polls every 5 minutes)
+
+            ## Polling Timeline
+            ${{ steps.security-polling.outputs.poll_results }}
+
+            ## Gate Decision
+            Security gate threshold: <6 High vulnerabilities required to proceed
+
+            **Result:** Deployment status based on final vulnerability count
+          format: MARKDOWN
+  deploy:
+    environment: DOW Production
+    steps:
+      - name: Checkout
+        uses: cloudbees-io/checkout@v1
+      - uses: cloudbees-days/setup-kubeconfig
+        name: Set kubeconfig
+        with:
+          kubeconfig: ${{ secrets.kubeconfig }}
+      - name: Deploy to cluster
+        uses: cloudbees-io/kustomize-deploy@v1
+        kind: deploy
+        with:
+          kustomization-base-dir: ${{ cloudbees.workspace }}/k8s/base
+          kustomization-overlays-dir: ${{ cloudbees.workspace }}/k8s/overlays/prod
+          environment-variables: "{}"
+      - name: Publish evidence
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          content: |-
+            ## Deployed environment
+            [Production frontend](https://hackers-organized-prod.preview.cb-demos.io/)
+
+            Running hackers-organized:${{ cloudbees.scm.sha }}
+            **Artifact ID:** ${{ needs.build-container-image.outputs.ARTIFACT_ID }}
+          format: MARKDOWN
+      - name: Register deployed artifact
+        uses: cloudbees-io/register-deployed-artifact@v2
+        with:
+          artifact-id: ${{ needs.build-container-image.outputs.ARTIFACT_ID }}
+          target-environment: "DOW Production"
+    needs:
+      - build-container-image
+      - scan
+      - security-check
+      - security-gate
