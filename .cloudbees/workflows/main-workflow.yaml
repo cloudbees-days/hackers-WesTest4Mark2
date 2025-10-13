@@ -78,6 +78,14 @@ jobs:
           registry: https://index.docker.io/v1/
           username: ${{ secrets.DOCKERHUB_USER }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: cloudbees-io/configure-oci-credentials@v1
+        name: Configure container registry credentials
+        continue-on-error: true
+        id: dockerconfig
+        with:
+          registry: https://index.docker.io/v1/
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - uses: cloudbees-io/kaniko@v1
         name: Build container image
         kind: build
@@ -180,10 +188,30 @@ jobs:
             | MAJOR_COUNT          | ${{ steps.FetchSonarQubeIssues.outputs.MAJOR_COUNT }} |
             | MINOR_COUNT          | ${{ steps.FetchSonarQubeIssues.outputs.MINOR_COUNT }} |
           format: MARKDOWN
+  get-component-info:
+    steps:
+      - name: Get Component Details
+        id: component-details
+        uses: cloudbees-io/cloudbees-platform-mcp@v1
+        with:
+          action: components_search
+          query: hackers-WesTest4Mark2
+      - name: Get Branch Details
+        id: branch-details
+        uses: cloudbees-io/cloudbees-platform-mcp@v1
+        with:
+          action: branches_list
+          componentId: ${{ fromJson(steps.component-details.outputs.result).id }}
+    outputs:
+      component_id: ${{ fromJson(steps.component-details.outputs.result).id }}
+      organization_id: ${{ fromJson(steps.component-details.outputs.result).organizationId }}
+      endpoint_id: ${{ fromJson(steps.component-details.outputs.result).endpointId }}
+      branch_id: ${{ fromJson(steps.branch-details.outputs.result)[0].id }}
   security-check:
     needs:
       - build-container-image
       - scan
+      - get-component-info
     outputs:
       vuln_count: ${{ steps.fetch-vulns.outputs.vuln_count }}
       severity_level: ${{ steps.fetch-vulns.outputs.severity_level }}
@@ -209,15 +237,17 @@ jobs:
             echo "✅ No bypass active - normal security gate enforcement"
           fi
 
-          # Dynamic construction - NO FALLBACKS
-          COMPONENT_ID="${{ cloudbees.component.id }}"
-          ORG_ID="2f05829d-ea2c-429e-7d3b-98ba87db3776"
-          ENDPOINT_ID="e8c14f62-66e8-4846-a077-3b9a887a7255"
+          # Use IDs from get-component-info job
+          COMPONENT_ID="${{ needs.get-component-info.outputs.component_id }}"
+          ORG_ID="${{ needs.get-component-info.outputs.organization_id }}"
+          ENDPOINT_ID="${{ needs.get-component-info.outputs.endpoint_id }}"
+          BRANCH_ID="${{ needs.get-component-info.outputs.branch_id }}"
           
           echo "🔍 Using dynamic component: $COMPONENT_ID"
+          echo "🔍 Using dynamic branch: $BRANCH_ID"
 
-          # Single API approach - component level issues (no branch needed)
-          API_URL="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/issues"
+          # Build CloudBees Unify REST API URL with dynamic IDs
+          API_URL="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/branches/${BRANCH_ID}/issues"
           echo "✅ CloudBees Unify API URL: $API_URL"
 
           # Make vulnerability API call
@@ -248,7 +278,10 @@ jobs:
           echo "HIGH" > $CLOUDBEES_OUTPUTS/severity_level
 
           echo "🔍 Security Scan Results:"
+          echo "- VERY HIGH Vulnerabilities: $VERY_HIGH_COUNT"
           echo "- HIGH Vulnerabilities: $HIGH_COUNT"
+          echo "- MEDIUM Vulnerabilities: $MEDIUM_COUNT"
+          echo "- LOW Vulnerabilities: $LOW_COUNT"
           echo "- TOTAL Vulnerabilities: $TOTAL_COUNT"
           
           if [ "${{ secrets.MARK_1Time_Bypass }}" = "TRUE" ]; then
@@ -263,7 +296,7 @@ jobs:
           content: |-
             # Security Vulnerability Report
 
-            **Component:** ${{ cloudbees.component.id }}
+            **Component:** ${{ needs.get-component-info.outputs.component_id }}
             **Security Check Date & Time:** ${{ steps.fetch-vulns.outputs.scan_datetime }}
             **Total Vulnerabilities:** ${{ steps.fetch-vulns.outputs.total_count }}
             **Data Source:** Real-time CloudBees Unify REST API
@@ -286,7 +319,9 @@ jobs:
             - **Total Risk**: All ${{ steps.fetch-vulns.outputs.total_count }} vulnerabilities require attention
           format: MARKDOWN
   security-gate:
-    needs: security-check
+    needs: 
+      - security-check
+      - get-component-info
     if: ${{ secrets.MARK_1Time_Bypass != 'TRUE' }}
     outputs:
       gate_status: ${{ steps.security-polling.outputs.gate_status }}
@@ -302,13 +337,14 @@ jobs:
           echo "🚨 SECURITY GATE ACTIVATED 🚨"
           echo "Initial High Vulnerabilities: ${{ needs.security-check.outputs.vuln_count }}"
 
-          # Same single API approach as security-check
-          COMPONENT_ID="${{ cloudbees.component.id }}"
-          ORG_ID="2f05829d-ea2c-429e-7d3b-98ba87db3776"
-          ENDPOINT_ID="e8c14f62-66e8-4846-a077-3b9a887a7255"
+          # Use same dynamic IDs from get-component-info
+          COMPONENT_ID="${{ needs.get-component-info.outputs.component_id }}"
+          ORG_ID="${{ needs.get-component-info.outputs.organization_id }}"
+          ENDPOINT_ID="${{ needs.get-component-info.outputs.endpoint_id }}"
+          BRANCH_ID="${{ needs.get-component-info.outputs.branch_id }}"
 
-          # Single API URL - NO FALLBACKS
-          API_URL="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/issues"
+          # Build API URL
+          API_URL="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/branches/${BRANCH_ID}/issues"
 
           # Initialize polling variables
           POLL_RESULTS=""
