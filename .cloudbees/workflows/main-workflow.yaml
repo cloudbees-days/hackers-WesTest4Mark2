@@ -35,7 +35,7 @@ jobs:
           org-name: cloudbees-days
           repo-name: hackers-WesTest4Mark2
           branch-name: main
-          workflow-name: test-and-build-image2
+          workflow-name: test-and-build-image
           test-type: JUnit
           test-result-location: junit.xml
       - name: Get source code
@@ -209,27 +209,58 @@ jobs:
             echo "✅ No bypass active - normal security gate enforcement"
           fi
 
-          # CORRECT CloudBees Unify REST API - Use known working format
+          # CloudBees Unify REST API - Try alternative branches endpoint
           COMPONENT_ID="${{ cloudbees.component.id }}"
           ORG_ID="2f05829d-ea2c-429e-7d3b-98ba87db3776"
           ENDPOINT_ID="e8c14f62-66e8-4846-a077-3b9a887a7255"
           
-          echo "🔍 Using validated CloudBees Unify REST API for component: $COMPONENT_ID"
+          echo "🔍 Using CloudBees Unify REST API for component: $COMPONENT_ID"
 
-          # Get branch ID from branches API
-          BRANCHES_RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.CLOUDBEES_API_TOKEN }}" \
-          "https://api.cloudbees.io/v1/components/$COMPONENT_ID/branches")
+          # Try alternative branches REST API endpoint format
+          echo "🔍 Trying branches REST API via resources path..."
+          BRANCHES_RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -H "Authorization: Bearer ${{ secrets.CLOUDBEES_API_TOKEN }}" \
+          "https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/branches")
 
-          if ! echo "$BRANCHES_RESPONSE" | jq -e '.[0].id' > /dev/null 2>&1; then
-            echo "❌ Failed to get branch details"
-            echo "Response: $BRANCHES_RESPONSE"
+          # Extract HTTP status and body
+          HTTP_STATUS=$(echo "$BRANCHES_RESPONSE" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
+          RESPONSE_BODY=$(echo "$BRANCHES_RESPONSE" | sed 's/HTTPSTATUS:[0-9]*$//')
+
+          echo "🔍 Branches API HTTP Status: $HTTP_STATUS"
+          echo "🔍 Branches API Response: $RESPONSE_BODY"
+
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "❌ Alternative branches API also failed with HTTP $HTTP_STATUS"
+            echo "Trying direct component branches endpoint..."
+            
+            # Fallback to original endpoint with debugging
+            BRANCHES_RESPONSE2=$(curl -s -w "HTTPSTATUS:%{http_code}" -H "Authorization: Bearer ${{ secrets.CLOUDBEES_API_TOKEN }}" \
+            "https://api.cloudbees.io/v1/components/${COMPONENT_ID}/branches")
+            
+            HTTP_STATUS2=$(echo "$BRANCHES_RESPONSE2" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
+            RESPONSE_BODY2=$(echo "$BRANCHES_RESPONSE2" | sed 's/HTTPSTATUS:[0-9]*$//')
+            
+            echo "🔍 Direct branches API HTTP Status: $HTTP_STATUS2"
+            echo "🔍 Direct branches API Response: $RESPONSE_BODY2"
+            
+            if [ "$HTTP_STATUS2" != "200" ]; then
+              echo "❌ Both branches API endpoints failed - cannot proceed"
+              exit 1
+            else
+              RESPONSE_BODY="$RESPONSE_BODY2"
+            fi
+          fi
+
+          # Validate branches response
+          if ! echo "$RESPONSE_BODY" | jq -e '.[0].id' > /dev/null 2>&1; then
+            echo "❌ Branches response missing branch data"
+            echo "Full response: $RESPONSE_BODY"
             exit 1
           fi
 
-          BRANCH_ID=$(echo "$BRANCHES_RESPONSE" | jq -r '.[0].id')
+          BRANCH_ID=$(echo "$RESPONSE_BODY" | jq -r '.[0].id')
           echo "✅ Found Branch ID: $BRANCH_ID"
 
-          # Build correct CloudBees Unify REST API URL
+          # Build CloudBees Unify REST API URL
           API_URL="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/branches/${BRANCH_ID}/issues"
           echo "✅ CloudBees Unify API URL: $API_URL"
 
@@ -315,21 +346,39 @@ jobs:
           echo "🚨 SECURITY GATE ACTIVATED 🚨"
           echo "Initial High Vulnerabilities: ${{ needs.security-check.outputs.vuln_count }}"
 
-          # Use same validated CloudBees Unify REST API format
+          # Use same REST API approach as security-check
           COMPONENT_ID="${{ cloudbees.component.id }}"
           ORG_ID="2f05829d-ea2c-429e-7d3b-98ba87db3776"
           ENDPOINT_ID="e8c14f62-66e8-4846-a077-3b9a887a7255"
 
-          # Get branch ID
-          BRANCHES_RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.CLOUDBEES_API_TOKEN }}" \
-          "https://api.cloudbees.io/v1/components/$COMPONENT_ID/branches")
+          # Get branch ID using same logic as security-check
+          BRANCHES_RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -H "Authorization: Bearer ${{ secrets.CLOUDBEES_API_TOKEN }}" \
+          "https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/branches")
 
-          if ! echo "$BRANCHES_RESPONSE" | jq -e '.[0].id' > /dev/null 2>&1; then
+          HTTP_STATUS=$(echo "$BRANCHES_RESPONSE" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
+          RESPONSE_BODY=$(echo "$BRANCHES_RESPONSE" | sed 's/HTTPSTATUS:[0-9]*$//')
+
+          if [ "$HTTP_STATUS" != "200" ]; then
+            BRANCHES_RESPONSE2=$(curl -s -w "HTTPSTATUS:%{http_code}" -H "Authorization: Bearer ${{ secrets.CLOUDBEES_API_TOKEN }}" \
+            "https://api.cloudbees.io/v1/components/${COMPONENT_ID}/branches")
+            
+            HTTP_STATUS2=$(echo "$BRANCHES_RESPONSE2" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
+            RESPONSE_BODY2=$(echo "$BRANCHES_RESPONSE2" | sed 's/HTTPSTATUS:[0-9]*$//')
+            
+            if [ "$HTTP_STATUS2" != "200" ]; then
+              echo "❌ Failed to get branch details - cannot proceed"
+              exit 1
+            else
+              RESPONSE_BODY="$RESPONSE_BODY2"
+            fi
+          fi
+
+          if ! echo "$RESPONSE_BODY" | jq -e '.[0].id' > /dev/null 2>&1; then
             echo "❌ Failed to get branch details - cannot proceed"
             exit 1
           fi
 
-          BRANCH_ID=$(echo "$BRANCHES_RESPONSE" | jq -r '.[0].id')
+          BRANCH_ID=$(echo "$RESPONSE_BODY" | jq -r '.[0].id')
 
           # Build API URL
           API_URL="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/branches/${BRANCH_ID}/issues"
