@@ -180,30 +180,10 @@ jobs:
             | MAJOR_COUNT          | ${{ steps.FetchSonarQubeIssues.outputs.MAJOR_COUNT }} |
             | MINOR_COUNT          | ${{ steps.FetchSonarQubeIssues.outputs.MINOR_COUNT }} |
           format: MARKDOWN
-  get-component-info:
-    steps:
-      - name: Get Component Details
-        id: component-details
-        uses: cloudbees-io/cloudbees-platform-mcp@v1
-        with:
-          action: components_search
-          query: hackers-WesTest4Mark2
-      - name: Get Branch Details
-        id: branch-details
-        uses: cloudbees-io/cloudbees-platform-mcp@v1
-        with:
-          action: branches_list
-          componentId: ${{ fromJson(steps.component-details.outputs.result).id }}
-    outputs:
-      component_id: ${{ fromJson(steps.component-details.outputs.result).id }}
-      organization_id: ${{ fromJson(steps.component-details.outputs.result).organizationId }}
-      endpoint_id: ${{ fromJson(steps.component-details.outputs.result).endpointId }}
-      branch_id: ${{ fromJson(steps.branch-details.outputs.result)[0].id }}
   security-check:
     needs:
       - build-container-image
       - scan
-      - get-component-info
     outputs:
       vuln_count: ${{ steps.fetch-vulns.outputs.vuln_count }}
       severity_level: ${{ steps.fetch-vulns.outputs.severity_level }}
@@ -229,16 +209,17 @@ jobs:
             echo "✅ No bypass active - normal security gate enforcement"
           fi
 
-          # Use IDs from get-component-info job
-          COMPONENT_ID="${{ needs.get-component-info.outputs.component_id }}"
-          ORG_ID="${{ needs.get-component-info.outputs.organization_id }}"
-          ENDPOINT_ID="${{ needs.get-component-info.outputs.endpoint_id }}"
-          BRANCH_ID="${{ needs.get-component-info.outputs.branch_id }}"
+          # WES CHANGE HERE - Update these IDs for each new repo
+          # Current values are for hackers-WesTest4Mark2 component
+          COMPONENT_ID="a86a456c-93d4-4c0b-92a5-b9a9ad66177b"
+          ORG_ID="2f05829d-ea2c-429e-7d3b-98ba87db3776"
+          ENDPOINT_ID="e8c14f62-66e8-4846-a077-3b9a887a7255"
+          BRANCH_ID="49d7232d-ad06-426e-9f0e-6313d8559237"
           
-          echo "🔍 Using dynamic component: $COMPONENT_ID"
-          echo "🔍 Using dynamic branch: $BRANCH_ID"
+          echo "🔍 Using component: $COMPONENT_ID"
+          echo "🔍 Using branch: $BRANCH_ID"
 
-          # Build CloudBees Unify REST API URL with dynamic IDs
+          # Build CloudBees Unify REST API URL
           API_URL="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/branches/${BRANCH_ID}/issues"
           echo "✅ CloudBees Unify API URL: $API_URL"
 
@@ -288,7 +269,7 @@ jobs:
           content: |-
             # Security Vulnerability Report
 
-            **Component:** ${{ needs.get-component-info.outputs.component_id }}
+            **Component:** ${{ cloudbees.component.id }}
             **Security Check Date & Time:** ${{ steps.fetch-vulns.outputs.scan_datetime }}
             **Total Vulnerabilities:** ${{ steps.fetch-vulns.outputs.total_count }}
             **Data Source:** Real-time CloudBees Unify REST API
@@ -311,9 +292,7 @@ jobs:
             - **Total Risk**: All ${{ steps.fetch-vulns.outputs.total_count }} vulnerabilities require attention
           format: MARKDOWN
   security-gate:
-    needs: 
-      - security-check
-      - get-component-info
+    needs: security-check
     if: ${{ secrets.MARK_1Time_Bypass != 'TRUE' }}
     outputs:
       gate_status: ${{ steps.security-polling.outputs.gate_status }}
@@ -329,11 +308,12 @@ jobs:
           echo "🚨 SECURITY GATE ACTIVATED 🚨"
           echo "Initial High Vulnerabilities: ${{ needs.security-check.outputs.vuln_count }}"
 
-          # Use same dynamic IDs from get-component-info
-          COMPONENT_ID="${{ needs.get-component-info.outputs.component_id }}"
-          ORG_ID="${{ needs.get-component-info.outputs.organization_id }}"
-          ENDPOINT_ID="${{ needs.get-component-info.outputs.endpoint_id }}"
-          BRANCH_ID="${{ needs.get-component-info.outputs.branch_id }}"
+          # WES CHANGE HERE - Update these IDs for each new repo (same as security-check)
+          # Current values are for hackers-WesTest4Mark2 component
+          COMPONENT_ID="a86a456c-93d4-4c0b-92a5-b9a9ad66177b"
+          ORG_ID="2f05829d-ea2c-429e-7d3b-98ba87db3776"
+          ENDPOINT_ID="e8c14f62-66e8-4846-a077-3b9a887a7255"
+          BRANCH_ID="49d7232d-ad06-426e-9f0e-6313d8559237"
 
           # Build API URL
           API_URL="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/branches/${BRANCH_ID}/issues"
