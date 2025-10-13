@@ -209,79 +209,33 @@ jobs:
             echo "✅ No bypass active - normal security gate enforcement"
           fi
 
-          # OPTION 3: Dynamic construction with main branch assumption
+          # Dynamic construction - NO FALLBACKS
           COMPONENT_ID="${{ cloudbees.component.id }}"
           ORG_ID="2f05829d-ea2c-429e-7d3b-98ba87db3776"
           ENDPOINT_ID="e8c14f62-66e8-4846-a077-3b9a887a7255"
           
           echo "🔍 Using dynamic component: $COMPONENT_ID"
-          echo "🔍 Assuming main branch for vulnerability data"
 
-          # Skip branches API - assume main branch exists and construct directly
-          # Try multiple branch ID patterns that might work
-          echo "🔍 Attempting direct issues API access..."
+          # Single API approach - component level issues (no branch needed)
+          API_URL="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/issues"
+          echo "✅ CloudBees Unify API URL: $API_URL"
 
-          # Try format 1: Direct component issues (no branch)
-          API_URL_1="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/issues"
-          
-          # Try format 2: With main branch assumption
-          API_URL_2="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/branches/main/issues"
-          
-          # Try format 3: Component level issues
-          API_URL_3="https://api.cloudbees.io/v1/components/${COMPONENT_ID}/issues"
+          # Make vulnerability API call
+          RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.CLOUDBEES_API_TOKEN }}" \
+          "${API_URL}?pagination.sort.order=1&pagination.sort.field_name=severity&pagination.page_length=100&pagination.page=1&triageStatus=UNREVIEWED")
 
-          echo "🔍 Trying API Format 1 (component level)..."
-          RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -H "Authorization: Bearer ${{ secrets.CLOUDBEES_API_TOKEN }}" \
-          "${API_URL_1}?pagination.sort.order=1&pagination.sort.field_name=severity&pagination.page_length=100&pagination.page=1&triageStatus=UNREVIEWED")
-
-          HTTP_STATUS=$(echo "$RESPONSE" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
-          RESPONSE_BODY=$(echo "$RESPONSE" | sed 's/HTTPSTATUS:[0-9]*$//')
-
-          if [ "$HTTP_STATUS" = "200" ] && ! echo "$RESPONSE_BODY" | jq -e '.error' > /dev/null 2>&1; then
-            echo "✅ API Format 1 successful"
-            FINAL_RESPONSE="$RESPONSE_BODY"
-          else
-            echo "❌ API Format 1 failed (HTTP: $HTTP_STATUS)"
-            echo "🔍 Trying API Format 2 (main branch)..."
-            
-            RESPONSE2=$(curl -s -w "HTTPSTATUS:%{http_code}" -H "Authorization: Bearer ${{ secrets.CLOUDBEES_API_TOKEN }}" \
-            "${API_URL_2}?pagination.sort.order=1&pagination.sort.field_name=severity&pagination.page_length=100&pagination.page=1&triageStatus=UNREVIEWED")
-
-            HTTP_STATUS2=$(echo "$RESPONSE2" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
-            RESPONSE_BODY2=$(echo "$RESPONSE2" | sed 's/HTTPSTATUS:[0-9]*$//')
-
-            if [ "$HTTP_STATUS2" = "200" ] && ! echo "$RESPONSE_BODY2" | jq -e '.error' > /dev/null 2>&1; then
-              echo "✅ API Format 2 successful"
-              FINAL_RESPONSE="$RESPONSE_BODY2"
-            else
-              echo "❌ API Format 2 failed (HTTP: $HTTP_STATUS2)"
-              echo "🔍 Trying API Format 3 (direct component)..."
-              
-              RESPONSE3=$(curl -s -w "HTTPSTATUS:%{http_code}" -H "Authorization: Bearer ${{ secrets.CLOUDBEES_API_TOKEN }}" \
-              "${API_URL_3}?pagination.sort.order=1&pagination.sort.field_name=severity&pagination.page_length=100&pagination.page=1&triageStatus=UNREVIEWED")
-
-              HTTP_STATUS3=$(echo "$RESPONSE3" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
-              RESPONSE_BODY3=$(echo "$RESPONSE3" | sed 's/HTTPSTATUS:[0-9]*$//')
-
-              if [ "$HTTP_STATUS3" = "200" ] && ! echo "$RESPONSE_BODY3" | jq -e '.error' > /dev/null 2>&1; then
-                echo "✅ API Format 3 successful"
-                FINAL_RESPONSE="$RESPONSE_BODY3"
-              else
-                echo "❌ All API formats failed - component may not be onboarded to asset store"
-                echo "Format 1 (HTTP $HTTP_STATUS): $RESPONSE_BODY"
-                echo "Format 2 (HTTP $HTTP_STATUS2): $RESPONSE_BODY2"
-                echo "Format 3 (HTTP $HTTP_STATUS3): $RESPONSE_BODY3"
-                exit 1
-              fi
-            fi
+          # Validate API response
+          if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
+            echo "❌ Vulnerability API Error: $(echo "$RESPONSE" | jq -r '.error')"
+            exit 1
           fi
 
-          # Extract vulnerability counts from successful response
-          VERY_HIGH_COUNT=$(echo "$FINAL_RESPONSE" | jq '.issues | map(select(.severity == "VERY_HIGH")) | length')
-          HIGH_COUNT=$(echo "$FINAL_RESPONSE" | jq '.issues | map(select(.severity == "HIGH")) | length')
-          MEDIUM_COUNT=$(echo "$FINAL_RESPONSE" | jq '.issues | map(select(.severity == "MEDIUM")) | length')
-          LOW_COUNT=$(echo "$FINAL_RESPONSE" | jq '.issues | map(select(.severity == "LOW")) | length')
-          TOTAL_COUNT=$(echo "$FINAL_RESPONSE" | jq '.issues | length')
+          # Extract vulnerability counts
+          VERY_HIGH_COUNT=$(echo "$RESPONSE" | jq '.issues | map(select(.severity == "VERY_HIGH")) | length')
+          HIGH_COUNT=$(echo "$RESPONSE" | jq '.issues | map(select(.severity == "HIGH")) | length')
+          MEDIUM_COUNT=$(echo "$RESPONSE" | jq '.issues | map(select(.severity == "MEDIUM")) | length')
+          LOW_COUNT=$(echo "$RESPONSE" | jq '.issues | map(select(.severity == "LOW")) | length')
+          TOTAL_COUNT=$(echo "$RESPONSE" | jq '.issues | length')
 
           # Output results
           echo "$HIGH_COUNT" > $CLOUDBEES_OUTPUTS/vuln_count
@@ -348,35 +302,13 @@ jobs:
           echo "🚨 SECURITY GATE ACTIVATED 🚨"
           echo "Initial High Vulnerabilities: ${{ needs.security-check.outputs.vuln_count }}"
 
-          # Use same dynamic approach as security-check
+          # Same single API approach as security-check
           COMPONENT_ID="${{ cloudbees.component.id }}"
           ORG_ID="2f05829d-ea2c-429e-7d3b-98ba87db3776"
           ENDPOINT_ID="e8c14f62-66e8-4846-a077-3b9a887a7255"
 
-          # Determine which API format worked in security-check (try same order)
-          API_URL_1="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/issues"
-          API_URL_2="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/branches/main/issues"
-          API_URL_3="https://api.cloudbees.io/v1/components/${COMPONENT_ID}/issues"
-
-          # Find working API format
-          WORKING_API_URL=""
-          for API_URL in "$API_URL_1" "$API_URL_2" "$API_URL_3"; do
-            TEST_RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -H "Authorization: Bearer ${{ secrets.CLOUDBEES_API_TOKEN }}" \
-            "${API_URL}?pagination.sort.order=1&pagination.sort.field_name=severity&pagination.page_length=100&pagination.page=1&triageStatus=UNREVIEWED")
-            
-            TEST_HTTP_STATUS=$(echo "$TEST_RESPONSE" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
-            TEST_RESPONSE_BODY=$(echo "$TEST_RESPONSE" | sed 's/HTTPSTATUS:[0-9]*$//')
-            
-            if [ "$TEST_HTTP_STATUS" = "200" ] && ! echo "$TEST_RESPONSE_BODY" | jq -e '.error' > /dev/null 2>&1; then
-              WORKING_API_URL="$API_URL"
-              break
-            fi
-          done
-
-          if [ -z "$WORKING_API_URL" ]; then
-            echo "❌ No working API format found - cannot proceed"
-            exit 1
-          fi
+          # Single API URL - NO FALLBACKS
+          API_URL="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/issues"
 
           # Initialize polling variables
           POLL_RESULTS=""
@@ -394,7 +326,7 @@ jobs:
 
             # Make API call
             RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.CLOUDBEES_API_TOKEN }}" \
-            "${WORKING_API_URL}?pagination.sort.order=1&pagination.sort.field_name=severity&pagination.page_length=100&pagination.page=1&triageStatus=UNREVIEWED")
+            "${API_URL}?pagination.sort.order=1&pagination.sort.field_name=severity&pagination.page_length=100&pagination.page=1&triageStatus=UNREVIEWED")
 
             # Extract current High count
             if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
