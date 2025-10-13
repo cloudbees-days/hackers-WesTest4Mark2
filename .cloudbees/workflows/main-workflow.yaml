@@ -307,6 +307,17 @@ jobs:
 
           echo "🚨 SECURITY GATE ACTIVATED 🚨"
           echo "Initial High Vulnerabilities: ${{ needs.security-check.outputs.vuln_count }}"
+          echo "Threshold: Must be <6 to proceed"
+          echo "Polling: Every 5 minutes for 30 minutes (7 polls total)"
+          echo ""
+
+          # Initialize variables
+          POLL_RESULTS=""
+          GATE_STATUS="FAILED"
+          FINAL_COUNT=${{ needs.security-check.outputs.vuln_count }}
+          START_TIME=$(date +%s)
+          END_TIME=$((START_TIME + 1800))  # 30 minutes = 1800 seconds
+          POLL_COUNT=0
 
           # WES CHANGE HERE - Update these IDs for each new repo (same as security-check)
           # Current values are for hackers-WesTest4Mark2 component
@@ -318,52 +329,83 @@ jobs:
           # Build API URL
           API_URL="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/branches/${BRANCH_ID}/issues"
 
-          # Initialize polling variables
-          POLL_RESULTS=""
-          GATE_STATUS="FAILED"
-          START_TIME=$(date +%s)
-          END_TIME=$((START_TIME + 1800))
-          POLL_COUNT=0
-
-          # 30-minute polling loop
+          # Polling loop - exactly 30 minutes with 5-minute intervals
           while [ $(date +%s) -lt $END_TIME ]; do
             POLL_COUNT=$((POLL_COUNT + 1))
+            POLL_TIME=$(date '+%Y-%m-%d %H:%M:%S %Z')
             ELAPSED_MIN=$(( (POLL_COUNT - 1) * 5 ))
 
             echo "🔍 High Security Check Poll #${POLL_COUNT} (${ELAPSED_MIN}:00 elapsed)"
 
-            # Make API call
+            # Make API call to check current vulnerability count
             RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.CLOUDBEES_API_TOKEN }}" \
             "${API_URL}?pagination.sort.order=1&pagination.sort.field_name=severity&pagination.page_length=100&pagination.page=1&triageStatus=UNREVIEWED")
 
             # Extract current High count
             if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
-              echo "❌ API Error during poll #${POLL_COUNT}"
-              exit 1
+              echo "❌ API Error during poll #${POLL_COUNT}: $(echo "$RESPONSE" | jq -r '.error')"
+              CURRENT_COUNT=${{ needs.security-check.outputs.vuln_count }}
+            else
+              CURRENT_COUNT=$(echo "$RESPONSE" | jq '.issues | map(select(.severity == "HIGH")) | length')
             fi
 
-            CURRENT_COUNT=$(echo "$RESPONSE" | jq '.issues | map(select(.severity == "HIGH")) | length')
             echo "   Result: ${CURRENT_COUNT} High vulnerabilities"
+            FINAL_COUNT=$CURRENT_COUNT
 
-            # Check success criteria
+            # Build poll results for evidence
+            POLL_RESULTS="${POLL_RESULTS}- **Poll #${POLL_COUNT}** (${POLL_TIME}): ${CURRENT_COUNT} High vulnerabilities"
+
+            # Check if we've met the criteria - Success threshold < 6 for HIGH
             if [ $CURRENT_COUNT -lt 6 ]; then
               echo "✅ SUCCESS: High vulnerabilities reduced to ${CURRENT_COUNT} (<6)"
+              POLL_RESULTS="${POLL_RESULTS} ✅ **PASSED**"$'\n'
               GATE_STATUS="PASSED"
               break
+            else
+              echo "⚠️  Still ${CURRENT_COUNT} High vulnerabilities (≥6)"
+              POLL_RESULTS="${POLL_RESULTS}"$'\n'
             fi
 
+            # Break if we've done 7 polls
             if [ $POLL_COUNT -ge 7 ]; then break; fi
+
+            # Wait 5 minutes before next poll
+            echo "⏰ Waiting 5 minutes before next poll..."
             sleep 300
           done
 
-          # Check exception after polling
-          if [ "$GATE_STATUS" = "FAILED" ] && [ "${{ secrets.MARK_1Time_Exception }}" = "TRUE" ]; then
-            echo "🚨 ONE-TIME VULNERABILITY EXCEPTION GRANTED!"
-            GATE_STATUS="PASSED"
+          # Check for One-Time Vulnerability Exception after polling completes
+          if [ "$GATE_STATUS" = "FAILED" ]; then
+            echo ""
+            echo "🔍 Checking One-Time Vulnerability Exception..."
+            if [ "${{ secrets.MARK_1Time_Exception }}" = "TRUE" ]; then
+              echo "🚨 ONE-TIME VULNERABILITY EXCEPTION GRANTED!"
+              echo "Security gate bypassed by administrative override"
+              GATE_STATUS="PASSED"
+              POLL_RESULTS="${POLL_RESULTS}- **EXCEPTION GRANTED**: One-time vulnerability exception applied"$'\n'
+            else
+              echo "❌ No exception granted - Security gate enforcement active"
+            fi
           fi
 
-          echo "$GATE_STATUS" > $CLOUDBEES_OUTPUTS/gate_status
+          # Final status
+          if [ "$GATE_STATUS" = "PASSED" ]; then
+            echo ""
+            echo "🎉 SECURITY GATE PASSED!"
+            echo "Final High vulnerability count: ${FINAL_COUNT}"
+          else
+            echo ""
+            echo "❌ SECURITY GATE FAILED!"
+            echo "Final High vulnerability count: ${FINAL_COUNT}"
+            echo "Developer did not meet the Security Criteria of fixing High Vulnerabilities!"
+          fi
 
+          # Output results
+          echo "$GATE_STATUS" > $CLOUDBEES_OUTPUTS/gate_status
+          echo "$FINAL_COUNT" > $CLOUDBEES_OUTPUTS/final_vuln_count
+          echo "$POLL_RESULTS" > $CLOUDBEES_OUTPUTS/poll_results
+
+          # Exit with error if gate failed
           if [ "$GATE_STATUS" = "FAILED" ]; then
             exit 1
           fi
