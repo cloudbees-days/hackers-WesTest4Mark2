@@ -209,18 +209,17 @@ jobs:
             echo "✅ No bypass active - normal security gate enforcement"
           fi
 
-          # WES CHANGE HERE - Update these IDs for each new repo
-          # Current values are for hackers-WesTest4Mark2 component
-          COMPONENT_ID="a86a456c-93d4-4c0b-92a5-b9a9ad66177b"
-          ORG_ID="2f05829d-ea2c-429e-7d3b-98ba87db3776"
+          # Dynamic CloudBees context variables
+          COMPONENT_ID="${{ cloudbees.component.id }}"
+          ORG_ID="${{ cloudbees.org.id }}"
           ENDPOINT_ID="e8c14f62-66e8-4846-a077-3b9a887a7255"
-          BRANCH_ID="49d7232d-ad06-426e-9f0e-6313d8559237"
+          BRANCH_NAME="${{ cloudbees.scm.branch }}"
           
           echo "🔍 Using component: $COMPONENT_ID"
-          echo "🔍 Using branch: $BRANCH_ID"
+          echo "🔍 Using branch: $BRANCH_NAME"
 
-          # Build CloudBees Unify REST API URL
-          API_URL="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/branches/${BRANCH_ID}/issues"
+          # Build CloudBees Unify REST API URL with branch name
+          API_URL="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/branches/${BRANCH_NAME}/issues"
           echo "✅ CloudBees Unify API URL: $API_URL"
 
           # Make vulnerability API call
@@ -319,15 +318,14 @@ jobs:
           END_TIME=$((START_TIME + 1800))  # 30 minutes = 1800 seconds
           POLL_COUNT=0
 
-          # WES CHANGE HERE - Update these IDs for each new repo (same as security-check)
-          # Current values are for hackers-WesTest4Mark2 component
-          COMPONENT_ID="a86a456c-93d4-4c0b-92a5-b9a9ad66177b"
-          ORG_ID="2f05829d-ea2c-429e-7d3b-98ba87db3776"
+          # Dynamic CloudBees context variables (same as security-check)
+          COMPONENT_ID="${{ cloudbees.component.id }}"
+          ORG_ID="${{ cloudbees.org.id }}"
           ENDPOINT_ID="e8c14f62-66e8-4846-a077-3b9a887a7255"
-          BRANCH_ID="49d7232d-ad06-426e-9f0e-6313d8559237"
+          BRANCH_NAME="${{ cloudbees.scm.branch }}"
 
-          # Build API URL
-          API_URL="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/branches/${BRANCH_ID}/issues"
+          # Build API URL with branch name
+          API_URL="https://api.cloudbees.io/v1/resources/${ORG_ID}/endpoints/${ENDPOINT_ID}/asset-store/components/${COMPONENT_ID}/branches/${BRANCH_NAME}/issues"
 
           # Polling loop - exactly 30 minutes with 5-minute intervals
           while [ $(date +%s) -lt $END_TIME ]; do
